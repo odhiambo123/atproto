@@ -336,6 +336,7 @@ export class QueueService {
         'r.reportType',
         'r.recordPath',
         'r.subjectMessageId',
+        'r.subjectConvoId',
         'me.modTool',
       ])
       .where('r.status', '!=', 'closed')
@@ -375,9 +376,11 @@ export class QueueService {
     for (const report of reports) {
       const subjectType: SubjectType = report.subjectMessageId
         ? 'message'
-        : report.recordPath
-          ? 'record'
-          : 'account'
+        : report.subjectConvoId
+          ? 'conversation'
+          : report.recordPath
+            ? 'record'
+            : 'account'
 
       // recordPath is 'collection/rkey' for records, '' for accounts
       const slashIdx = report.recordPath.indexOf('/')

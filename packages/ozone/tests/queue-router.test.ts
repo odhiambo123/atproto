@@ -86,6 +86,22 @@ describe('queue-router', () => {
     })
   }
 
+  // Creates a conversation-level report event via modClient
+  const reportConvo = async (
+    did: string,
+    convoId: string,
+    reportType: string,
+  ) => {
+    await modClient.emitEvent({
+      event: {
+        $type: 'tools.ozone.moderation.defs#modEventReport',
+        reportType,
+        comment: 'automated test report',
+      },
+      subject: { $type: 'chat.bsky.convo.defs#convoRef', did, convoId },
+    })
+  }
+
   // Returns the most recent report for a subject using the queryReports API.
   // Pass a DID for account subjects or an at:// URI for record subjects.
   const queryLatestReportForSubject = async (
@@ -302,6 +318,79 @@ describe('queue-router', () => {
       expect(report).toBeDefined()
       expect(report.queue?.id).toBe(spamPostQueueId)
       expect(report.isAutomated).toBe(true)
+    })
+
+    it('skips disabled queues when routing', async () => {
+      // Disable the threat queue and create the report concurrently
+      await Promise.all([
+        agent.tools.ozone.queue.updateQueue(
+          { queueId: threatAccountQueueId, enabled: false },
+          {
+            encoding: 'application/json',
+            headers: await modHeaders(ids.ToolsOzoneQueueUpdateQueue),
+          },
+        ),
+        reportAccount(sc.dids.alice, REASON_THREAT),
+      ])
+
+      await network.ozone.daemon.ctx.queueRouter.routeReports()
+
+      const report = await queryLatestReportForSubject(sc.dids.alice, 'open')
+      expect(report).toBeDefined()
+      // Threat queue is disabled, so no match → queue is absent
+      expect(report.queue).toBeUndefined()
+
+      // Re-enable the queue for subsequent tests
+      await agent.tools.ozone.queue.updateQueue(
+        { queueId: threatAccountQueueId, enabled: true },
+        {
+          encoding: 'application/json',
+          headers: await modHeaders(ids.ToolsOzoneQueueUpdateQueue),
+        },
+      )
+    })
+
+    it('routes a conversation report to the matching conversation queue', async () => {
+      const convoQueue = await createQueue({
+        name: 'QR: Spam Convos',
+        subjectTypes: ['conversation'],
+        reportTypes: [REASON_SPAM],
+      })
+
+      await reportConvo(sc.dids.carol, 'qr-convo-spam-1', REASON_SPAM)
+
+      const beforeRouting = new Date()
+      await network.ozone.daemon.ctx.queueRouter.routeReports()
+
+      const { reports } = await modClient.queryReports({
+        status: 'queued',
+        subjectType: 'conversation',
+      })
+      const report = reports[0]
+      expect(report).toBeDefined()
+      expect(report.queue?.id).toBe(convoQueue.id)
+      expect(new Date(report.queuedAt!).getTime()).toBeGreaterThanOrEqual(
+        beforeRouting.getTime(),
+      )
+
+      await deleteQueue(convoQueue.id)
+    })
+
+    it('does not route a conversation report to an account queue', async () => {
+      // Only the account-level threat queue accepts REASON_THREAT — a
+      // conversation report with the same reason must stay unmatched.
+      await reportConvo(sc.dids.carol, 'qr-convo-threat-1', REASON_THREAT)
+
+      await network.ozone.daemon.ctx.queueRouter.routeReports()
+
+      const { reports } = await modClient.queryReports({
+        status: 'open',
+        subjectType: 'conversation',
+      })
+      const report = reports[0]
+      expect(report).toBeDefined()
+      expect(report.queue).toBeUndefined()
+      expect(report.queuedAt).toBeUndefined()
     })
 
     it('skips disabled queues when routing', async () => {
